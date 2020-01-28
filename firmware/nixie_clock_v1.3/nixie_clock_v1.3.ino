@@ -1,68 +1,52 @@
 /*
-  Скетч к проекту "Часы на ГРИ"
-  Страница проекта (схемы, описания): https://alexgyver.ru/nixieclock/
-  Исходники на GitHub: https://github.com/AlexGyver/nixieclock/
-  Нравится, как написан код? Поддержи автора! https://alexgyver.ru/support_alex/
-  Автор: AlexGyver Technologies, 2018
-  https://AlexGyver.ru/
-
-  1.2 - добавлена настройка "реверс индикаторов" для платы на ИН-12
-  1.3 - добавлена настройка, позволяющая отключать отображение температуры
-*/
-/*
   SET
-    - удержали в режиме часов - настройка БУДИЛЬНИКА
-    - удержали в режиме настройки будильника - настройка ЧАСОВ
-    - двойной клик в режиме будильника - вернуться к часам
+    - удержали в режиме часов - настройка ЧАСОВ
+    - удержали в режиме настройки часов - настройка Будильника
+    - двойной клик в режиме настройки часов или будильника - вернуться к часам
     - удержали в настройке часов - возврат к часам с новым временем
     - клик во время настройки - смена настройки часов/минут
-  ALARM - вкл/выкл будильник
+  UP
+    - вкл/выкл будильника
+  DOWN
+    - посмотреть время будильника
+
 */
 // ************************** НАСТРОЙКИ **************************
-#define BRIGHT 100          // яркость цифр дневная, %
-#define BRIGHT_N 20         // яркость ночная, %
 #define NIGHT_START 23      // час перехода на ночную подсветку (BRIGHT_N)
 #define NIGHT_END 7         // час перехода на дневную подсветку (BRIGHT)
 #define FREQ 900            // частота писка будильника
-#define REVERSE_TUBES 0     // 1 - зеркально "отразить" отображение времени (для платы ИН-12), 0 - нет
+#define REVERSE_TUBES 0     // 1 - зеркально "отразить" отображение времени 
 
-#define SHOW_TEMP_HUM 1     // 0 - не показывать температуру и вл., 1 - показывать
-#define CLOCK_TIME 10       // время (с), которое отображаются часы
-#define TEMP_TIME 5         // время (с), которое отображается температура и влажность
+#define CLOCK_TIME 7       // время (с), которое отображаются часы будильника
 #define ALM_TIMEOUT 30      // таймаут будильника
 
-// *********************** ДЛЯ РАЗРАБОТЧИКОВ ***********************
-#define BURN_TIME 200       // период обхода в режиме очистки
-#define REDRAW_TIME 3000    // время цикла одной цифры, мс
-#define ON_TIME 2200        // время включенности одной цифры, мс
 
 // пины
-#define PIEZO 3
-#define DHT_PIN 2
-#define ALARM 11
+#define PIEZO 10
 
-#define DECODER0 A0
+//#define ALARM 10
+
+#define DECODER0 A3
 #define DECODER1 A1
-#define DECODER2 A2
-#define DECODER3 A3
+#define DECODER2 A0
+#define DECODER3 A2
 
-#define KEY0 4    // точка
-#define KEY1 10   // часы 
-#define KEY2 9    // часы
+#define KEY0 11   // точка
+#define KEY1 3   // часы
+#define KEY2 4    // часы
 #define KEY3 5    // минуты
 #define KEY4 6    // минуты
 #define KEY5 7    // секунды
 #define KEY6 8    // секунды
 
-#include "DHT.h"
-DHT dht(DHT_PIN, DHT22);
+/////////////////////////////////////////////////////////////////////////////////////////
 
 #include "GyverTimer.h"
-GTimer_us redrawTimer(REDRAW_TIME);
-GTimer_ms modeTimer((long)CLOCK_TIME * 1000);
+
+GTimer_ms modeTimer((long) CLOCK_TIME * 1000);
 GTimer_ms dotTimer(500);
 GTimer_ms blinkTimer(800);
-GTimer_ms almTimer((long)ALM_TIMEOUT * 1000);
+GTimer_ms almTimer((long) ALM_TIMEOUT * 1000);
 
 #include "GyverButton.h"
 GButton btnSet(3, LOW_PULL, NORM_OPEN);
@@ -86,19 +70,20 @@ byte digitsDraw[7];
 boolean dotFlag;
 int8_t hrs = 10, mins = 10, secs;
 int8_t alm_hrs = 10, alm_mins = 10;
-boolean indState;
-int8_t mode = 0;    // 0 часы, 1 температура, 2 настройка будильника, 3 настройка часов, 4 аларм
+int8_t mode = 0;    // 0 часы, 2 настройка будильника, 1 настройка часов, 4 аларм
 boolean changeFlag;
 boolean blinkFlag;
-int on_time = ON_TIME;
 boolean alm_flag;
+boolean alm_on;
 
 void setup() {
   Serial.begin(9600);
+
+  TCCR1B = TCCR1B & 0b11111000 | 0x01;
+
   almTimer.stop();
   btnSet.setTimeout(400);
   btnSet.setDebounce(90);
-  dht.begin();
   rtc.begin();
   if (rtc.lostPower()) {
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
@@ -121,55 +106,64 @@ void setup() {
   pinMode(KEY6, OUTPUT);
 
   pinMode(PIEZO, OUTPUT);
-  pinMode(ALARM, INPUT_PULLUP);
+//  pinMode(ALARM, INPUT_PULLUP);
 
   if (EEPROM.readByte(100) != 66) {   // проверка на первый запуск
     EEPROM.writeByte(100, 66);
     EEPROM.writeByte(0, 0);     // часы будильника
-    EEPROM.writeByte(1, 0);     // минуты будильника
+    EEPROM.writeByte(1, 0);// минуты будильника
+    EEPROM.writeByte(2, false);
   }
   alm_hrs = EEPROM.readByte(0);
   alm_mins = EEPROM.readByte(1);
-
+  alm_on = EEPROM.readByte(2);
   sendTime();
-  changeBright();
 }
 
 void sendTime() {
-  digitsDraw[1] = (byte)hrs / 10;
-  digitsDraw[2] = (byte)hrs % 10;
+  if (mode == 3 || mode == 2) {
+    digitsDraw[1] = (byte) alm_hrs / 10;
+    digitsDraw[2] = (byte) alm_hrs % 10;
 
-  digitsDraw[3] = (byte)mins / 10;
-  digitsDraw[4] = (byte)mins % 10;
+    digitsDraw[3] = (byte) alm_mins / 10;
+    digitsDraw[4] = (byte) alm_mins % 10;
 
-  digitsDraw[5] = (byte)secs / 10;
-  digitsDraw[6] = (byte)secs % 10;
-}
+    digitsDraw[5] = (byte) 0;
+    digitsDraw[6] = (byte) 0;
+  } else {
+    digitsDraw[1] = (byte) hrs / 10;
+    digitsDraw[2] = (byte) hrs % 10;
 
-void changeBright() {
-  // установка яркости от времени суток
-  if ( (hrs >= NIGHT_START && hrs <= 23)
-       || (hrs >= 0 && hrs <= NIGHT_END) ) on_time = (float)ON_TIME * BRIGHT_N / 100;
-  else on_time = (float)ON_TIME * BRIGHT / 100;
+    digitsDraw[3] = (byte) mins / 10;
+    digitsDraw[4] = (byte) mins % 10;
+
+    digitsDraw[5] = (byte) secs / 10;
+    digitsDraw[6] = (byte) secs % 10;
+  }
+  showDigits();
 }
 
 void loop() {
-  if (redrawTimer.isReady()) showDigits();
-  if (dotTimer.isReady() && (mode == 0 || mode == 1)) calculateTime();
-  buttonsTick();
-  
-  if (SHOW_TEMP_HUM && !alm_flag) modeTick();
+  if (hrs > NIGHT_END && hrs < NIGHT_START) {
+    analogWrite(9, 230);// min_stable 110 default 130
+  } else analogWrite(9, 115);
+
+  calculateTime();
+}
+
+void processKeys() {
+  int analog = analogRead(A6);
+  btnSet.tick(analog >= 900);
+  btnUp.tick(analog > 700 && analog < 900);
+  btnDwn.tick(analog > 150 && analog < 400);
 }
 
 void buttonsTick() {
-  int analog = analogRead(7);
-
-  btnSet.tick(analog <= 1023 && analog > 1000);
-  btnUp.tick(analog <= 820 && analog > 690);
-  btnDwn.tick(analog <= 280 && analog > 120);
-
-  if (mode == 2 || mode == 3) {
+  processKeys();
+  if (mode == 1 || mode == 2) {
     if (btnUp.isClick()) {
+      modeTimer.setInterval((long) CLOCK_TIME * 1000);
+      blinkFlag = true;
       if (mode == 2) {
         if (!changeFlag) {
           alm_mins++;
@@ -194,10 +188,13 @@ void buttonsTick() {
           hrs++;
           if (hrs > 23) hrs = 0;
         }
+        rtc.adjust(DateTime(2014, 1, 21, hrs, mins, 0));
       }
     }
 
     if (btnDwn.isClick()) {
+      modeTimer.setInterval((long) CLOCK_TIME * 1000);
+      blinkFlag = true;
       if (mode == 2) {
         if (!changeFlag) {
           alm_mins--;
@@ -222,6 +219,7 @@ void buttonsTick() {
           hrs--;
           if (hrs < 0) hrs = 23;
         }
+        rtc.adjust(DateTime(2014, 1, 21, hrs, mins, 0));
       }
     }
 
@@ -230,23 +228,7 @@ void buttonsTick() {
       else blinkTimer.setInterval(200);
       blinkFlag = !blinkFlag;
     }
-
-    if (mode == 2) {
-      digitsDraw[1] = alm_hrs / 10;
-      digitsDraw[2] = alm_hrs % 10;
-      digitsDraw[3] = alm_mins / 10;
-      digitsDraw[4] = alm_mins % 10;
-    } else {
-      digitsDraw[1] = hrs / 10;
-      digitsDraw[2] = hrs % 10;
-      digitsDraw[3] = mins / 10;
-      digitsDraw[4] = mins % 10;
-    }
-
-    digitsDraw[5] = 0;  // секунды
-    digitsDraw[6] = 0;  // секунды
-
-    if (blinkFlag) {      // горим
+    /*if (blinkFlag) {      // горим
       if (changeFlag) {
         digitsDraw[1] = 10;
         digitsDraw[2] = 10;
@@ -254,117 +236,101 @@ void buttonsTick() {
         digitsDraw[3] = 10;
         digitsDraw[4] = 10;
       }
-    }
-  }
-
-  if (mode == 1 && btnSet.isClick()) {
-    mode = 0;
-    modeTimer.setInterval((long)CLOCK_TIME * 1000);
+    }*/
   }
 
   if (mode == 0 && btnSet.isHolded()) {
+    mode = 1;
+    modeTimer.setInterval((long) CLOCK_TIME * 1000);
+  }
+
+  if ((mode == 1 && btnSet.isHolded())) {
+    rtc.adjust(DateTime(2014, 1, 21, hrs, mins, 0));
+    sendTime();
+    modeTimer.setInterval((long) CLOCK_TIME * 1000);
     mode = 2;
   }
 
   if (mode == 2 && btnSet.isHolded()) {
+    sendTime();
+    EEPROM.updateByte(0, alm_hrs);
+    EEPROM.updateByte(1, alm_mins);
+    alm_on = true;
+    EEPROM.updateByte(2, alm_on);
+    mode = 0;
+  }
+
+  if ((mode == 1 || mode == 2)&& btnSet.isDouble()) {
+    sendTime();
+    EEPROM.updateByte(0, alm_hrs);
+    EEPROM.updateByte(1, alm_mins);
+    alm_on = true;
+    EEPROM.updateByte(2, alm_on);
+    mode = 0;
+  }
+
+  if ((mode == 1 || mode == 2) && btnSet.isClick()) {
+    changeFlag = !changeFlag;
+    modeTimer.setInterval((long) CLOCK_TIME * 1000);
+  }
+
+  if (modeTimer.isReady()) {
+    if (mode == 1) {
+      rtc.adjust(DateTime(2014, 1, 21, hrs, mins, 0));
+    } else if (mode == 2) {
+      EEPROM.updateByte(0, alm_hrs);
+      EEPROM.updateByte(1, alm_mins);
+    }
+    mode = 0;
+  }
+
+  if (mode == 0 && btnUp.isClick()) {
+    alm_on = !alm_on;
+    EEPROM.updateByte(2, alm_on);
+  }
+
+  if (mode == 0 && btnDwn.isClick()) {
     mode = 3;
   }
 
-  if (mode == 2 && btnSet.isDouble()) {
-    sendTime();
-
-    EEPROM.updateByte(0, alm_hrs);
-    EEPROM.updateByte(1, alm_mins);
+  if (mode == 3 && btnDwn.isClick()) {
     mode = 0;
-    modeTimer.setInterval((long)CLOCK_TIME * 1000);
-  }
-
-  if (mode == 3 && btnSet.isHolded()) {
-    sendTime();
-    mode = 0;
-    secs = 0;
-    EEPROM.updateByte(0, alm_hrs);
-    EEPROM.updateByte(1, alm_mins);
-    rtc.adjust(DateTime(2014, 1, 21, hrs, mins, 0));
-
-    changeBright();
-    modeTimer.setInterval((long)CLOCK_TIME * 1000);
-  }
-
-  if ((mode == 2 || mode == 3) && btnSet.isClick()) {
-    changeFlag = !changeFlag;
-  }
-
-}
-
-void modeTick() {
-  if (modeTimer.isReady()) {
-    if (mode == 0) {
-      for (byte i = 1; i < 7; i++) digitsDraw[i] = 10;
-      mode = 1;
-      dotFlag = false;
-      byte temp = dht.readTemperature();
-      byte hum = dht.readHumidity();
-      digitsDraw[1] = temp / 10;
-      digitsDraw[2] = temp % 10;
-      digitsDraw[3] = 10;
-      digitsDraw[4] = 10;
-      digitsDraw[5] = hum / 10;
-      digitsDraw[6] = hum % 10;
-      modeTimer.setInterval((long)TEMP_TIME * 1000);
-    } else if (mode == 1) {
-      for (byte i = 1; i < 7; i++) digitsDraw[i] = 10;
-      mode = 0;
-      modeTimer.setInterval((long)CLOCK_TIME * 1000);
-    }
   }
 }
 
 void calculateTime() {
-  dotFlag = !dotFlag;
-  if (dotFlag) {
-    secs++;
-    if (secs > 59) {
-      secs = 0;
-      mins++;
+  if (dotTimer.isReady()) dotFlag = !dotFlag;
+  buttonsTick();
+  DateTime now = rtc.now();
+  secs = now.second();
+  mins = now.minute();
+  hrs = now.hour();;
+  sendTime();
 
-      if (mins == 1 || mins == 30) {      // каждые полчаса
-        burnIndicators();                 // чистим чистим!
-        DateTime now = rtc.now();         // синхронизация с RTC
-        secs = now.second();
-        mins = now.minute();
-        hrs = now.hour();
-      }
+Serial.println(mode);
 
-      if (!alm_flag && alm_mins == mins && alm_hrs == hrs && !digitalRead(ALARM)) {
-        mode = 0;
-        alm_flag = true;
-        almTimer.start();
-        almTimer.reset();
-      }
-    }
-    if (mins > 59) {
-      mins = 0;
-      hrs++;
-      if (hrs > 23) hrs = 0;
-      changeBright();
-    }
+  if (secs == 0 && mode == 0 ) {      // каждые полчаса
+    burnIndicators();    // чистим чистим!
+  }
 
+  // Serial.println(alm_hrs);
 
-    if (mode == 0) sendTime();
+  if (!alm_flag && alm_mins == mins && alm_hrs == hrs && alm_on) {
+    mode = 0;
+    alm_flag = true;
+    almTimer.start();
+    almTimer.reset();
+  }
 
-    if (alm_flag) {
-      if (almTimer.isReady() || digitalRead(ALARM)) {
-        alm_flag = false;
-        almTimer.stop();
-        mode = 0;
-        noTone(PIEZO);
-        modeTimer.setInterval((long)CLOCK_TIME * 1000);
-      }
+  if (alm_flag) {
+    if (almTimer.isReady() || !alm_on) {
+      alm_flag = false;
+      almTimer.stop();
+      mode = 0;
+      noTone(PIEZO);
     }
   }
 
-  // мигать на будильнике
   if (alm_flag) {
     if (!dotFlag) {
       noTone(PIEZO);
@@ -378,72 +344,118 @@ void calculateTime() {
 }
 
 void burnIndicators() {
-  for (byte ind = 0; ind < 7; ind++) {
-    digitalWrite(opts[ind], 1);
+  unsigned int lasttime[7];
+  for (int i = 1; i < 7; ++i) {
+    lasttime[i] = digitsDraw[i];
   }
-  for (byte dig = 0; dig < 10; dig++) {
-    setDigit(dig);
-    delayMicroseconds(BURN_TIME);
+
+  for (int i = 1; i < 7; ++i) {
+    digitsDraw[i]++;
+    while (digitsDraw[i] != lasttime[i]) {
+      for (int x = 0; x < 2; x++) {
+        showDigits();
+      }
+      digitsDraw[i]++;
+      if (digitsDraw[i] > 9) digitsDraw[i] = 0;
+    }
   }
 }
 
 void showDigits() {
-  if (indState) {
-    indState = false;
-    redrawTimer.setInterval(on_time);   // переставляем таймер, столько индикаторы будут светить
-    counter++;                          // счётчик бегает по индикаторам (0 - 6)
-    if (counter > 6) counter = 0;
-
-    if (counter != 0) {                   // если это не точка
-      setDigit(digitsDraw[counter]);      // отображаем ЦИФРУ в её ИНДИКАТОР
-      digitalWrite(opts[counter], 1);     // включаем текущий индикатор
-    } else {                              // если это точка
-      if (dotFlag)
-        if (mode != 1) digitalWrite(opts[counter], 1);   // включаем точку
-        else
-          digitalWrite(opts[counter], 0);   // выключаем точку
+  if (alm_on)
+    digitalWrite(opts[0], HIGH);
+  else
+    digitalWrite(opts[0], LOW);
+  //Выводим часы и мигаем при настройке
+  for (int i = 1; i < 3; ++i) {
+    setDigit(digitsDraw[i]);
+    if (!((mode == 1 || mode == 2) && changeFlag && blinkFlag)) {
+      digitalWrite(opts[i], HIGH);
+      delay(2);
+      //потушим первый индикатор
+      digitalWrite(opts[i], LOW);
+      delay(1);
     }
-
-  } else {
-    indState = true;
-    digitalWrite(opts[counter], 0);                 // выключаем текущий индикатор
-    //setDigit(10);
-    redrawTimer.setInterval(REDRAW_TIME - on_time); // переставляем таймер, столько индикаторы будут выключены
+  }
+//Выводим минуты и мигаем при настройке
+  for (int i = 3; i < 5; ++i) {
+    setDigit(digitsDraw[i]);
+    if (!((mode == 1 || mode == 2) && !changeFlag && blinkFlag)) {
+      digitalWrite(opts[i], HIGH);
+      delay(2);
+      //потушим первый индикатор
+      digitalWrite(opts[i], LOW);
+      delay(1);
+    }
+  }
+  if (mode == 0) {
+    for (int i = 5; i < 7; ++i) {
+      setDigit(digitsDraw[i]);
+      digitalWrite(opts[i], HIGH);
+      delay(2);
+      //потушим первый индикатор
+      digitalWrite(opts[i], LOW);
+      delay(1);
+    }
   }
 }
 
 // настраиваем декодер согласно отображаемой ЦИФРЕ
 void setDigit(byte digit) {
   switch (digit) {
-    case 0: setDecoder(0, 0, 0, 0);
+    case 0:digitalWrite(DECODER0, LOW);
+      digitalWrite(DECODER1, LOW);
+      digitalWrite(DECODER2, LOW);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 1: setDecoder(1, 0, 0, 0);
+    case 1:digitalWrite(DECODER0, HIGH);
+      digitalWrite(DECODER1, LOW);
+      digitalWrite(DECODER2, LOW);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 2: setDecoder(0, 0, 1, 0);
+    case 2:digitalWrite(DECODER0, LOW);
+      digitalWrite(DECODER1, HIGH);
+      digitalWrite(DECODER2, LOW);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 3: setDecoder(1, 0, 1, 0);
+    case 3:digitalWrite(DECODER0, HIGH);
+      digitalWrite(DECODER1, HIGH);
+      digitalWrite(DECODER2, LOW);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 4: setDecoder(0, 0, 0, 1);
+    case 4:digitalWrite(DECODER0, LOW);
+      digitalWrite(DECODER1, LOW);
+      digitalWrite(DECODER2, HIGH);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 5: setDecoder(1, 0, 0, 1);
+    case 5:digitalWrite(DECODER0, HIGH);
+      digitalWrite(DECODER1, LOW);
+      digitalWrite(DECODER2, HIGH);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 6: setDecoder(0, 0, 1, 1);
+    case 6:digitalWrite(DECODER0, LOW);
+      digitalWrite(DECODER1, HIGH);
+      digitalWrite(DECODER2, HIGH);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 7: setDecoder(1, 0, 1, 1);
+    case 7:digitalWrite(DECODER0, HIGH);
+      digitalWrite(DECODER1, HIGH);
+      digitalWrite(DECODER2, HIGH);
+      digitalWrite(DECODER3, LOW);
       break;
-    case 8: setDecoder(0, 1, 0, 0);
+    case 8:digitalWrite(DECODER0, LOW);
+      digitalWrite(DECODER1, LOW);
+      digitalWrite(DECODER2, LOW);
+      digitalWrite(DECODER3, HIGH);
       break;
-    case 9: setDecoder(1, 1, 0, 0);
+    case 9:digitalWrite(DECODER0, HIGH);
+      digitalWrite(DECODER1, LOW);
+      digitalWrite(DECODER2, LOW);
+      digitalWrite(DECODER3, HIGH);
       break;
-    case 10: setDecoder(0, 1, 1, 1);    // выключить цифру!
-      break;
+    case 10:digitalWrite(DECODER0, LOW);
+      digitalWrite(DECODER1, HIGH);
+      digitalWrite(DECODER2, HIGH);
+      digitalWrite(DECODER3, HIGH);
   }
-}
-
-// функция настройки декодера
-void setDecoder(boolean dec0, boolean dec1, boolean dec2, boolean dec3) {
-  digitalWrite(DECODER0, dec0);
-  digitalWrite(DECODER1, dec1);
-  digitalWrite(DECODER2, dec2);
-  digitalWrite(DECODER3, dec3);
 }
